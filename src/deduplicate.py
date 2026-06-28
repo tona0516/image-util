@@ -42,14 +42,22 @@ class UnionFind:
         return False
 
 
+def convert_palette_to_rgba_if_needed(img):
+    """
+    Pモードで透過情報がある場合、RGBAに変換する（Pillowの警告回避）。
+    """
+    if img.mode == "P" and "transparency" in img.info:
+        return img.convert("RGBA")
+    return img
+
+
 def calculate_dhash(img, hash_size=8):
     """
     ImageオブジェクトからdHash（Difference Hash）値を計算する。
     """
     try:
         # dHashは各行の隣接ピクセルを比較するため、横方向に1ピクセル多く縮小する
-        if img.mode == "P" and "transparency" in img.info:
-            img = img.convert("RGBA")
+        img = convert_palette_to_rgba_if_needed(img)
         img_resized = img.convert("L").resize(
             (hash_size + 1, hash_size), Image.Resampling.BILINEAR
         )
@@ -84,10 +92,8 @@ def compare_color_histograms(img1, img2):
     値は 0.0（全く異なる）から 1.0（完全に一致）の間になる。
     """
     try:
-        if img1.mode == "P" and "transparency" in img1.info:
-            img1 = img1.convert("RGBA")
-        if img2.mode == "P" and "transparency" in img2.info:
-            img2 = img2.convert("RGBA")
+        img1 = convert_palette_to_rgba_if_needed(img1)
+        img2 = convert_palette_to_rgba_if_needed(img2)
         img1 = img1.convert("RGB")
         img2 = img2.convert("RGB")
 
@@ -116,10 +122,8 @@ def compare_pixel_difference(img1, img2, size=128):
     値は 0.0 から 255.0 の間になり、0.0 に近いほどピクセルレベルで同一。
     """
     try:
-        if img1.mode == "P" and "transparency" in img1.info:
-            img1 = img1.convert("RGBA")
-        if img2.mode == "P" and "transparency" in img2.info:
-            img2 = img2.convert("RGBA")
+        img1 = convert_palette_to_rgba_if_needed(img1)
+        img2 = convert_palette_to_rgba_if_needed(img2)
         img1_gray = img1.convert("L").resize((size, size), Image.Resampling.BILINEAR)
         img2_gray = img2.convert("L").resize((size, size), Image.Resampling.BILINEAR)
 
@@ -163,6 +167,16 @@ def verify_duplicates_detailed(path1, path2, hist_threshold=0.80, diff_threshold
         return False
 
 
+def read_image_details(path, hash_size):
+    """
+    画像をオープンして、解像度（width, height）とdhash値を返す。
+    """
+    with Image.open(path) as img:
+        width, height = img.size
+        h = calculate_dhash(img, hash_size)
+    return width, height, h
+
+
 def process_single_image(path, file, hash_size):
     """
     1枚の画像を処理し、ImageInfoを返す。
@@ -172,22 +186,35 @@ def process_single_image(path, file, hash_size):
         size = os.path.getsize(path)
 
         # 解像度取得とハッシュ計算を1回のオープンで行う
-        with Image.open(path) as img:
-            width, height = img.size
-            h = calculate_dhash(img, hash_size)
+        width, height, h = read_image_details(path, hash_size)
+        if h is None:
+            return None
 
-        if h is not None:
-            return ImageInfo(
-                path=path,
-                filename=file,
-                dhash=h,
-                width=width,
-                height=height,
-                size=size,
-            )
+        return ImageInfo(
+            path=path,
+            filename=file,
+            dhash=h,
+            width=width,
+            height=height,
+            size=size,
+        )
     except Exception as e:
         print(f"警告: {path} の処理に失敗しました: {e}", file=sys.stderr)
-    return None
+        return None
+
+
+def collect_image_tasks(directory_path):
+    """
+    指定ディレクトリ内からサポートされている拡張子の画像ファイルをスキャンし、(path, file) のリストを返す。
+    """
+    tasks = []
+    for root, _, files in os.walk(directory_path):
+        for file in files:
+            ext = os.path.splitext(file)[1].lower()
+            if ext in SUPPORTED_EXTENSIONS:
+                path = os.path.join(root, file)
+                tasks.append((path, file))
+    return tasks
 
 
 def scan_directory(directory_path, hash_size=8):
@@ -203,13 +230,7 @@ def scan_directory(directory_path, hash_size=8):
         return []
 
     # スキャン対象ファイルのリストアップ
-    tasks = []
-    for root, _, files in os.walk(directory_path):
-        for file in files:
-            ext = os.path.splitext(file)[1].lower()
-            if ext in SUPPORTED_EXTENSIONS:
-                path = os.path.join(root, file)
-                tasks.append((path, file))
+    tasks = collect_image_tasks(directory_path)
 
     image_infos = []
 
@@ -228,6 +249,27 @@ def scan_directory(directory_path, hash_size=8):
     return image_infos
 
 
+def should_union(info1, info2, threshold, args=None):
+    """
+    2つの画像情報を比較し、重複判定基準を満たしていれば True を返す。
+    """
+    dist = hamming_distance(info1.dhash, info2.dhash)
+    if dist > threshold:
+        return False
+
+    # 厳密検証の実行 (no-strict オプションが指定されていない場合)
+    if args and not args.no_strict:
+        if not verify_duplicates_detailed(
+            info1.path,
+            info2.path,
+            hist_threshold=args.hist_threshold,
+            diff_threshold=args.diff_threshold,
+        ):
+            return False
+
+    return True
+
+
 def find_duplicate_groups(image_infos, threshold, args=None):
     """
     ハミング距離のしきい値に基づいて、重複画像をグループ化する。
@@ -239,18 +281,7 @@ def find_duplicate_groups(image_infos, threshold, args=None):
     # 総当たりで比較（$O(N^2)$）
     for i in range(n):
         for j in range(i + 1, n):
-            dist = hamming_distance(image_infos[i].dhash, image_infos[j].dhash)
-            if dist <= threshold:
-                # 厳密検証の実行 (no-strict オプションが指定されていない場合)
-                if args and not args.no_strict:
-                    if not verify_duplicates_detailed(
-                        image_infos[i].path,
-                        image_infos[j].path,
-                        hist_threshold=args.hist_threshold,
-                        diff_threshold=args.diff_threshold,
-                    ):
-                        continue  # 厳密検証に落ちたら重複判定をスキップ
-
+            if should_union(image_infos[i], image_infos[j], threshold, args):
                 uf.union(i, j)
 
     # グループごとに整理
@@ -284,6 +315,75 @@ def select_best_image(group):
     return sorted_group[0], sorted_group[1:]
 
 
+def get_display_path(path):
+    """
+    相対パスを取得し、カレントディレクトリ表現（./）から始まらない場合は付与する。
+    """
+    rel_path = os.path.relpath(path)
+    if not rel_path.startswith(".") and not rel_path.startswith("/"):
+        return f"./{rel_path}"
+    return rel_path
+
+
+def get_redundant_info(original_path, rep_path):
+    """
+    カラーヒストグラム交差とMAEを計算する。
+    """
+    hist_corr = 0.0
+    mae = 0.0
+    try:
+        with Image.open(original_path) as img1, Image.open(rep_path) as img2:
+            hist_corr = compare_color_histograms(img1, img2)
+            mae = compare_pixel_difference(img1, img2)
+    except Exception:
+        pass
+    return hist_corr, mae
+
+
+def resolve_dest_path(output_dir, filename):
+    """
+    移動先のディレクトリ内でファイル名が重複しないよう自動リネームしたパスを返す。
+    """
+    dest_path = os.path.join(output_dir, filename)
+    if not os.path.exists(dest_path):
+        return dest_path
+
+    base, ext = os.path.splitext(filename)
+    counter = 1
+    while os.path.exists(os.path.join(output_dir, f"{base}_{counter}{ext}")):
+        counter += 1
+    return os.path.join(output_dir, f"{base}_{counter}{ext}")
+
+
+def execute_file_action(rep, action, output_dir):
+    """
+    重複画像に対するアクション（削除または移動）を実際に実行する。
+    """
+    rep_rel_path = get_display_path(rep.path)
+    if action == "delete":
+        try:
+            os.remove(rep.path)
+            return True
+        except Exception as e:
+            print(
+                f"    {rep_rel_path} の削除に失敗しました: {e}",
+                file=sys.stderr,
+            )
+            return False
+    elif action == "move":
+        try:
+            dest_path = resolve_dest_path(output_dir, rep.filename)
+            shutil.move(rep.path, dest_path)
+            return True
+        except Exception as e:
+            print(
+                f"    {rep_rel_path} の移動に失敗しました: {e}",
+                file=sys.stderr,
+            )
+            return False
+    return False
+
+
 def handle_duplicates(duplicate_groups, action, output_dir):
     """
     重複画像を移動または削除する。
@@ -312,9 +412,7 @@ def handle_duplicates(duplicate_groups, action, output_dir):
 
     for i, group in enumerate(duplicate_groups, 1):
         original, redundants = select_best_image(group)
-        orig_rel_path = os.path.relpath(original.path)
-        if not orig_rel_path.startswith(".") and not orig_rel_path.startswith("/"):
-            orig_rel_path = f"./{orig_rel_path}"
+        orig_rel_path = get_display_path(original.path)
 
         print(f"Group {i}:")
         print(
@@ -322,19 +420,8 @@ def handle_duplicates(duplicate_groups, action, output_dir):
         )
 
         for rep in redundants:
-            rep_rel_path = os.path.relpath(rep.path)
-            if not rep_rel_path.startswith(".") and not rep_rel_path.startswith("/"):
-                rep_rel_path = f"./{rep_rel_path}"
-
-            # カラーヒストグラム交差と MAE の計算
-            hist_corr = 0.0
-            mae = 0.0
-            try:
-                with Image.open(original.path) as img1, Image.open(rep.path) as img2:
-                    hist_corr = compare_color_histograms(img1, img2)
-                    mae = compare_pixel_difference(img1, img2)
-            except Exception as e:
-                pass
+            rep_rel_path = get_display_path(rep.path)
+            hist_corr, mae = get_redundant_info(original.path, rep.path)
 
             print(
                 f"  [重複] {rep_rel_path} ({rep.width}x{rep.height}, {rep.size / 1024:.1f} KB) - "
@@ -345,37 +432,8 @@ def handle_duplicates(duplicate_groups, action, output_dir):
             saved_space += rep.size
 
             if not dryrun:
-                if action == "delete":
-                    try:
-                        os.remove(rep.path)
-                        moved_or_deleted_count += 1
-                    except Exception as e:
-                        print(
-                            f"    {rep_rel_path} の削除に失敗しました: {e}",
-                            file=sys.stderr,
-                        )
-                elif action == "move":
-                    try:
-                        # 移動先でファイル名が衝突しないようにリネーム処理
-                        dest_path = os.path.join(output_dir, rep.filename)
-                        if os.path.exists(dest_path):
-                            base, ext = os.path.splitext(rep.filename)
-                            counter = 1
-                            while os.path.exists(
-                                os.path.join(output_dir, f"{base}_{counter}{ext}")
-                            ):
-                                counter += 1
-                            dest_path = os.path.join(
-                                output_dir, f"{base}_{counter}{ext}"
-                            )
-
-                        shutil.move(rep.path, dest_path)
-                        moved_or_deleted_count += 1
-                    except Exception as e:
-                        print(
-                            f"    {rep_rel_path} の移動に失敗しました: {e}",
-                            file=sys.stderr,
-                        )
+                if execute_file_action(rep, action, output_dir):
+                    moved_or_deleted_count += 1
         print()
 
     print("-" * 50)

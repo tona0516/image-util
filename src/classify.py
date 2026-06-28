@@ -29,14 +29,17 @@ def pad_text(
     """マルチバイト文字を考慮してパディングを行う"""
     current_width = get_east_asian_width(text)
     padding_needed = max(0, target_width - current_width)
+    if padding_needed == 0:
+        return text
+
     if align == "<":
         return text + (fillchar * padding_needed)
-    elif align == ">":
+    if align == ">":
         return (fillchar * padding_needed) + text
-    else:
-        left_padding = padding_needed // 2
-        right_padding = padding_needed - left_padding
-        return (fillchar * left_padding) + text + (fillchar * right_padding)
+
+    left_padding = padding_needed // 2
+    right_padding = padding_needed - left_padding
+    return (fillchar * left_padding) + text + (fillchar * right_padding)
 
 
 def get_device() -> torch.device:
@@ -88,6 +91,78 @@ def get_image_paths(images_dir: Path) -> list[Path]:
     )
 
 
+def determine_destination(probs) -> str:
+    """
+    確率の1位と2位の差が10%以内の場合はpendingフォルダ、
+    それ以外は1位のクラスフォルダを返す。
+    """
+    classes = ["photo", "illustration", "manga"]
+    prob_class_pairs = list(zip(probs, classes))
+    prob_class_pairs.sort(key=lambda x: x[0], reverse=True)
+
+    first_prob, first_class = prob_class_pairs[0]
+    second_prob, second_class = prob_class_pairs[1]
+
+    if (first_prob - second_prob) <= 0.10:
+        return "pending"
+    return first_class
+
+
+def process_single_image(
+    path: Path,
+    text_features: torch.Tensor,
+    model: CLIPModel,
+    processor: CLIPProcessor,
+    device: torch.device,
+) -> None:
+    """
+    単一の画像に対して分類とフォルダ移動を実行する。
+    """
+    # 画像の読み込みとRGB変換
+    with Image.open(path) as img:
+        if img.mode == "P" and "transparency" in img.info:
+            img = img.convert("RGBA")
+        img_rgb = img.convert("RGB")
+
+        # 画像の前処理
+        image_inputs = processor(images=img_rgb, return_tensors="pt").to(device)
+
+        # 特徴量の抽出と類似度の計算
+        with torch.no_grad():
+            image_outputs = model.get_image_features(**image_inputs)
+            image_features = image_outputs.pooler_output
+            # L2正規化
+            image_features = image_features / image_features.norm(
+                p=2, dim=-1, keepdim=True
+            )
+
+            # 類似度の計算（内積）とスケール調整
+            logit_scale = model.logit_scale.exp()
+            logits_per_image = logit_scale * (
+                image_features @ text_features.t()
+            )
+
+            # 確率の計算 (softmax)
+            probs = logits_per_image.softmax(dim=-1).cpu().numpy()[0]
+
+    photo_prob = probs[0]
+    illust_prob = probs[1]
+    manga_prob = probs[2]
+
+    # 移動先フォルダの決定
+    dest_folder = determine_destination(probs)
+
+    padded_name = pad_text(path.name, 50)
+    print(
+        f"{padded_name} | {photo_prob:12.1%} | {illust_prob:12.1%} | {manga_prob:12.1%} | {dest_folder:<12}"
+    )
+
+    # フォルダの作成とファイルの移動
+    dest_dir = path.parent / dest_folder
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(path), str(dest_dir / path.name))
+
+
 def classify_images(
     image_paths: list[Path],
     text_features: torch.Tensor,
@@ -104,60 +179,7 @@ def classify_images(
 
     for path in image_paths:
         try:
-            # 画像の読み込みとRGB変換
-            with Image.open(path) as img:
-                if img.mode == "P" and "transparency" in img.info:
-                    img = img.convert("RGBA")
-                img_rgb = img.convert("RGB")
-
-                # 画像の前処理
-                image_inputs = processor(images=img_rgb, return_tensors="pt").to(device)
-
-                # 特徴量の抽出と類似度の計算
-                with torch.no_grad():
-                    image_outputs = model.get_image_features(**image_inputs)
-                    image_features = image_outputs.pooler_output
-                    # L2正規化
-                    image_features = image_features / image_features.norm(
-                        p=2, dim=-1, keepdim=True
-                    )
-
-                    # 類似度の計算（内積）とスケール調整
-                    logit_scale = model.logit_scale.exp()
-                    logits_per_image = logit_scale * (
-                        image_features @ text_features.t()
-                    )
-
-                    # 確率の計算 (softmax)
-                    probs = logits_per_image.softmax(dim=-1).cpu().numpy()[0]
-
-                photo_prob = probs[0]
-                illust_prob = probs[1]
-                manga_prob = probs[2]
-
-                # 確率の1位と2位の差が10%以内の場合はpendingフォルダに分類
-                classes = ["photo", "illustration", "manga"]
-                prob_class_pairs = list(zip(probs, classes))
-                prob_class_pairs.sort(key=lambda x: x[0], reverse=True)
-
-                first_prob, first_class = prob_class_pairs[0]
-                second_prob, second_class = prob_class_pairs[1]
-
-                if (first_prob - second_prob) <= 0.10:
-                    dest_folder = "pending"
-                else:
-                    dest_folder = first_class
-
-                padded_name = pad_text(path.name, 50)
-                print(
-                    f"{padded_name} | {photo_prob:12.1%} | {illust_prob:12.1%} | {manga_prob:12.1%} | {dest_folder:<12}"
-                )
-
-                # フォルダの作成とファイルの移動
-                dest_dir = path.parent / dest_folder
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(path), str(dest_dir / path.name))
-
+            process_single_image(path, text_features, model, processor, device)
         except Exception as e:
             print(f"エラー（ファイル名: {path.name}）: {e}")
 
