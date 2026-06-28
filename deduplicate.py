@@ -76,6 +76,80 @@ def hamming_distance(hash1, hash2):
     return bin(hash1 ^ hash2).count("1")
 
 
+def compare_color_histograms(img1, img2):
+    """
+    Pillowのhistogram()を用いて、2つの画像の正規化ヒストグラム交差（Histogram Intersection）を計算する。
+    値は 0.0（全く異なる）から 1.0（完全に一致）の間になる。
+    """
+    try:
+        img1 = img1.convert("RGB")
+        img2 = img2.convert("RGB")
+
+        hist1 = img1.histogram()
+        hist2 = img2.histogram()
+
+        # 各チャンネル（R, G, B）のピクセル数で割って正規化
+        total1 = img1.width * img1.height
+        total2 = img2.width * img2.height
+
+        # ピクセル数で正規化したヒストグラムの交差を計算
+        intersection = 0.0
+        for h1, h2 in zip(hist1, hist2):
+            intersection += min(h1 / total1, h2 / total2)
+
+        # 3チャンネル合計なので、3.0で割って 0.0 - 1.0 の範囲にする
+        return intersection / 3.0
+    except Exception as e:
+        print(f"ヒストグラム比較中にエラーが発生しました: {e}", file=sys.stderr)
+        return 0.0
+
+
+def compare_pixel_difference(img1, img2, size=128):
+    """
+    2つの画像を中解像度のグレースケールに縮小し、ピクセル間の平均絶対誤差（MAE）を計算する。
+    値は 0.0 から 255.0 の間になり、0.0 に近いほどピクセルレベルで同一。
+    """
+    try:
+        img1_gray = img1.convert("L").resize((size, size), Image.Resampling.BILINEAR)
+        img2_gray = img2.convert("L").resize((size, size), Image.Resampling.BILINEAR)
+
+        bytes1 = img1_gray.tobytes()
+        bytes2 = img2_gray.tobytes()
+
+        total_diff = 0
+        for b1, b2 in zip(bytes1, bytes2):
+            total_diff += abs(b1 - b2)
+
+        mae = total_diff / (size * size)
+        return mae
+    except Exception as e:
+        print(f"ピクセル差分比較中にエラーが発生しました: {e}", file=sys.stderr)
+        return 255.0
+
+
+def verify_duplicates_detailed(path1, path2, hist_threshold=0.80, diff_threshold=10.0):
+    """
+    2つの画像について、カラーヒストグラムと中解像度ピクセル差分の詳細検証を行う。
+    両方のテストをパス（色が似ており、ピクセル差分が小さい）した場合にのみ True を返す。
+    """
+    try:
+        with Image.open(path1) as img1, Image.open(path2) as img2:
+            # 1. カラーヒストグラムの比較
+            hist_corr = compare_color_histograms(img1, img2)
+            if hist_corr < hist_threshold:
+                return False
+
+            # 2. 中解像度ピクセル差分の比較
+            mae = compare_pixel_difference(img1, img2)
+            if mae > diff_threshold:
+                return False
+
+        return True
+    except Exception as e:
+        print(f"詳細比較中にエラーが発生しました ({path1} vs {path2}): {e}", file=sys.stderr)
+        return False
+
+
 def process_single_image(path, file, hash_size):
     """
     1枚の画像を処理し、ImageInfoを返す。
@@ -141,7 +215,7 @@ def scan_directory(directory_path, hash_size=8):
     return image_infos
 
 
-def find_duplicate_groups(image_infos, threshold):
+def find_duplicate_groups(image_infos, threshold, args=None):
     """
     ハミング距離のしきい値に基づいて、重複画像をグループ化する。
     """
@@ -154,6 +228,16 @@ def find_duplicate_groups(image_infos, threshold):
         for j in range(i + 1, n):
             dist = hamming_distance(image_infos[i].dhash, image_infos[j].dhash)
             if dist <= threshold:
+                # 厳密検証の実行 (no-strict オプションが指定されていない場合)
+                if args and not args.no_strict:
+                    if not verify_duplicates_detailed(
+                        image_infos[i].path,
+                        image_infos[j].path,
+                        hist_threshold=args.hist_threshold,
+                        diff_threshold=args.diff_threshold,
+                    ):
+                        continue  # 厳密検証に落ちたら重複判定をスキップ
+
                 uf.union(i, j)
 
     # グループごとに整理
@@ -215,14 +299,34 @@ def handle_duplicates(duplicate_groups, action, output_dir):
 
     for i, group in enumerate(duplicate_groups, 1):
         original, redundants = select_best_image(group)
+        orig_rel_path = os.path.relpath(original.path)
+        if not orig_rel_path.startswith(".") and not orig_rel_path.startswith("/"):
+            orig_rel_path = f"./{orig_rel_path}"
+
         print(f"Group {i}:")
         print(
-            f"  [保持] {original.filename} ({original.width}x{original.height}, {original.size / 1024:.1f} KB)"
+            f"  [保持] {orig_rel_path} ({original.width}x{original.height}, {original.size / 1024:.1f} KB)"
         )
 
         for rep in redundants:
+            rep_rel_path = os.path.relpath(rep.path)
+            if not rep_rel_path.startswith(".") and not rep_rel_path.startswith("/"):
+                rep_rel_path = f"./{rep_rel_path}"
+
+            # カラーヒストグラム交差と MAE の計算
+            hist_corr = 0.0
+            mae = 0.0
+            try:
+                with Image.open(original.path) as img1, Image.open(rep.path) as img2:
+                    hist_corr = compare_color_histograms(img1, img2)
+                    mae = compare_pixel_difference(img1, img2)
+            except Exception as e:
+                pass
+
             print(
-                f"  [重複] {rep.filename} ({rep.width}x{rep.height}, {rep.size / 1024:.1f} KB) - ハミング距離: {hamming_distance(original.dhash, rep.dhash)}"
+                f"  [重複] {rep_rel_path} ({rep.width}x{rep.height}, {rep.size / 1024:.1f} KB) - "
+                f"ハミング距離: {hamming_distance(original.dhash, rep.dhash)}, "
+                f"ヒストグラム交差: {hist_corr:.4f}, MAE: {mae:.2f}"
             )
 
             saved_space += rep.size
@@ -234,7 +338,7 @@ def handle_duplicates(duplicate_groups, action, output_dir):
                         moved_or_deleted_count += 1
                     except Exception as e:
                         print(
-                            f"    {rep.filename} の削除に失敗しました: {e}",
+                            f"    {rep_rel_path} の削除に失敗しました: {e}",
                             file=sys.stderr,
                         )
                 elif action == "move":
@@ -256,7 +360,7 @@ def handle_duplicates(duplicate_groups, action, output_dir):
                         moved_or_deleted_count += 1
                     except Exception as e:
                         print(
-                            f"    {rep.filename} の移動に失敗しました: {e}",
+                            f"    {rep_rel_path} の移動に失敗しました: {e}",
                             file=sys.stderr,
                         )
         print()
@@ -307,6 +411,23 @@ def main():
         default="dry-run",
         help="重複画像に対する処理。実際にファイルを移動または削除する場合は 'move' または 'delete' を指定します (デフォルト: dry-run)",
     )
+    parser.add_argument(
+        "--no-strict",
+        action="store_true",
+        help="カラーヒストグラムおよびピクセル差分による詳細検証をスキップし、dHashのみで判定します",
+    )
+    parser.add_argument(
+        "--hist-threshold",
+        type=float,
+        default=0.80,
+        help="カラーヒストグラム交差のしきい値。これ未満の類似度のものは別画像とみなします (デフォルト: 0.80, 範囲: 0.0-1.0)",
+    )
+    parser.add_argument(
+        "--diff-threshold",
+        type=float,
+        default=10.0,
+        help="中解像度ピクセル差分(MAE)のしきい値。これを超える平均輝度差のものは別画像とみなします (デフォルト: 10.0, 範囲: 0.0-255.0)",
+    )
 
     args = parser.parse_args()
 
@@ -326,7 +447,7 @@ def main():
         print("画像が見つからないか、スキャンに失敗しました。")
         sys.exit(0)
 
-    duplicate_groups = find_duplicate_groups(image_infos, args.threshold)
+    duplicate_groups = find_duplicate_groups(image_infos, args.threshold, args)
     handle_duplicates(duplicate_groups, args.action, output_dir)
 
 
