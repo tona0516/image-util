@@ -58,9 +58,9 @@ def to_original_quality(url: str) -> str:
 
 
 def filename_from_url(
-    url: str, username: str, datetime_str: str | None, index: int
+    url: str, username: str, datetime_str: str | None
 ) -> str:
-    """画像情報から保存用のファイル名を作る (@アカウント名_YYYY-MM-DD-SS_メディアID_インデックス.拡張子)"""
+    """画像情報から保存用のファイル名を作る (@アカウント名_YYYY-MM-DD-SS_メディアID.拡張子)"""
     parsed = urlparse(url)
     media_id = os.path.basename(parsed.path)
 
@@ -77,7 +77,7 @@ def filename_from_url(
     # 日付フォーマットの生成
     date_str = format_datetime_jst(datetime_str)
 
-    return f"@{safe_username}_{date_str}_{media_id}_{index}{ext}"
+    return f"@{safe_username}_{date_str}_{media_id}{ext}"
 
 
 async def get_logged_in_context(playwright):
@@ -153,13 +153,12 @@ async def collect_image_urls(page) -> dict:
             datetime_str = item["datetime"]
             urls = item["urls"]
 
-            for idx, url in enumerate(urls, start=1):
+            for url in urls:
                 orig_url = to_original_quality(url)
                 if orig_url not in collected:
                     collected[orig_url] = {
                         "username": username,
                         "datetime": datetime_str,
-                        "index": idx,
                     }
         after_count = len(collected)
 
@@ -188,7 +187,6 @@ def download_images(items: dict, save_dir: str):
     for idx, (url, info) in enumerate(items_sorted, start=1):
         username = info["username"]
         datetime_str = info["datetime"]
-        img_index = info["index"]
 
         parsed = urlparse(url)
         media_id = os.path.basename(parsed.path)
@@ -197,7 +195,8 @@ def download_images(items: dict, save_dir: str):
         already_exists = False
         existing_filename = None
         for f in existing_files:
-            if f"_{media_id}_" in f:
+            name_without_ext, _ = os.path.splitext(f)
+            if name_without_ext.endswith(f"_{media_id}"):
                 already_exists = True
                 existing_filename = f
                 break
@@ -206,7 +205,7 @@ def download_images(items: dict, save_dir: str):
             print(f"[{idx}/{len(items_sorted)}] スキップ（既存メディアID）: {existing_filename}")
             continue
 
-        filename = filename_from_url(url, username, datetime_str, img_index)
+        filename = filename_from_url(url, username, datetime_str)
         filepath = os.path.join(save_dir, filename)
 
         if os.path.exists(filepath):
