@@ -205,19 +205,22 @@ def process_single_image(path, file, hash_size):
 
 def collect_image_tasks(directory_path):
     """
-    指定ディレクトリ内からサポートされている拡張子の画像ファイルをスキャンし、(path, file) のリストを返す。
+    指定ディレクトリ直下からサポートされている拡張子の画像ファイルをスキャンし、(path, file) のリストを返す。
     """
     tasks = []
-    for root, _, files in os.walk(directory_path):
-        for file in files:
-            ext = os.path.splitext(file)[1].lower()
-            if ext in SUPPORTED_EXTENSIONS:
-                path = os.path.join(root, file)
-                tasks.append((path, file))
+    try:
+        for file in os.listdir(directory_path):
+            path = os.path.join(directory_path, file)
+            if os.path.isfile(path):
+                ext = os.path.splitext(file)[1].lower()
+                if ext in SUPPORTED_EXTENSIONS:
+                    tasks.append((path, file))
+    except Exception as e:
+        print(f"ディレクトリのスキャン中にエラーが発生しました: {e}", file=sys.stderr)
     return tasks
 
 
-def scan_directory(directory_path, hash_size=8):
+def scan_directory(directory_path, hash_size=16):
     """
     指定ディレクトリ内の画像をスキャンして情報を取得する。
     """
