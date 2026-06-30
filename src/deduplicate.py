@@ -257,8 +257,8 @@ def should_union(info1, info2, threshold, args=None):
     if dist > threshold:
         return False
 
-    # 厳密検証の実行 (no-strict オプションが指定されていない場合)
-    if args and not args.no_strict:
+    # 厳密検証の実行
+    if args:
         if not verify_duplicates_detailed(
             info1.path,
             info2.path,
@@ -472,7 +472,7 @@ def main():
         "-t",
         "--threshold",
         type=int,
-        default=3,
+        default=2,
         help="重複判定するハミング距離のしきい値。小さいほど厳密 (デフォルト: 2, 範囲: 0-64)",
     )
     parser.add_argument(
@@ -483,20 +483,17 @@ def main():
         help="重複画像に対する処理。実際にファイルを移動または削除する場合は 'move' または 'delete' を指定します (デフォルト: dryrun)",
     )
     parser.add_argument(
-        "--no-strict",
-        action="store_true",
-        help="カラーヒストグラムおよびピクセル差分による詳細検証をスキップし、dHashのみで判定します",
-    )
-    parser.add_argument(
+        "-ht",
         "--hist-threshold",
         type=float,
         default=0.80,
         help="カラーヒストグラム交差のしきい値。これ未満の類似度のものは別画像とみなします (デフォルト: 0.80, 範囲: 0.0-1.0)",
     )
     parser.add_argument(
+        "-dt",
         "--diff-threshold",
         type=float,
-        default=10.0,
+        default=10,
         help="中解像度ピクセル差分(MAE)のしきい値。これを超える平均輝度差のものは別画像とみなします (デフォルト: 10.0, 範囲: 0.0-255.0)",
     )
 
