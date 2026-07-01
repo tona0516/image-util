@@ -188,20 +188,24 @@ def verify_duplicates_detailed(
     try:
         with Image.open(path1) as img1, Image.open(path2) as img2:
             # 1. カラーヒストグラムの比較
-            hist_corr = compare_color_histograms(img1, img2)
-            if hist_corr < hist_threshold:
-                return False
+            if hist_threshold >= 0:
+                hist_corr = compare_color_histograms(img1, img2)
+                if hist_corr < hist_threshold:
+                    return False
 
             # 2. 中解像度ピクセル差分の比較と差分割合の検証
-            mae, diff_count, diff_ratio = analyze_pixel_differences(
-                img1, img2, diff_threshold=pixel_diff_threshold
-            )
-            if mae > diff_threshold:
-                return False
+            if diff_threshold >= 0 or (pixel_diff_ratio >= 0 and pixel_diff_threshold >= 0):
+                pdt = max(0, pixel_diff_threshold)
+                mae, diff_count, diff_ratio = analyze_pixel_differences(
+                    img1, img2, diff_threshold=pdt
+                )
+                if diff_threshold >= 0 and mae > diff_threshold:
+                    return False
 
-            # 顕著な差分があるピクセル割合がしきい値以上の場合は別画像
-            if diff_ratio > pixel_diff_ratio:
-                return False
+                # 顕著な差分があるピクセル割合がしきい値以上の場合は別画像
+                if pixel_diff_ratio >= 0 and pixel_diff_threshold >= 0:
+                    if diff_ratio > pixel_diff_ratio:
+                        return False
 
         return True
     except Exception as e:
@@ -303,7 +307,7 @@ def should_union(info1, info2, threshold, args=None):
     2つの画像情報を比較し、重複判定基準を満たしていれば True を返す。
     """
     dist = hamming_distance(info1.dhash, info2.dhash)
-    if dist > threshold:
+    if threshold >= 0 and dist > threshold:
         return False
 
     # 厳密検証の実行
@@ -468,6 +472,8 @@ def handle_duplicates(duplicate_groups, action, output_dir, args=None):
     saved_space = 0
 
     pixel_diff_threshold = getattr(args, "pixel_diff_threshold", 15) if args else 15
+    if pixel_diff_threshold < 0:
+        pixel_diff_threshold = 15
 
     for i, group in enumerate(duplicate_groups, 1):
         original, redundants = select_best_image(group)
@@ -534,7 +540,7 @@ def main():
         "--threshold",
         type=int,
         default=2,
-        help="重複判定するハミング距離のしきい値。小さいほど厳密 (デフォルト: 2, 範囲: 0-64)",
+        help="重複判定するハミング距離のしきい値。小さいほど厳密。マイナスの値でこの判定を無効化 (デフォルト: 2, 範囲: -1-64)",
     )
     parser.add_argument(
         "-a",
@@ -548,28 +554,28 @@ def main():
         "--hist-threshold",
         type=float,
         default=0.80,
-        help="カラーヒストグラム交差のしきい値。これ未満の類似度のものは別画像とみなします (デフォルト: 0.80, 範囲: 0.0-1.0)",
+        help="カラーヒストグラム交差のしきい値。これ未満の類似度のものは別画像とみなします。マイナスの値でこの判定を無効化 (デフォルト: 0.80, 範囲: -1.0-1.0)",
     )
     parser.add_argument(
         "-dt",
         "--diff-threshold",
         type=float,
         default=10,
-        help="中解像度ピクセル差分(MAE)のしきい値。これを超える平均輝度差のものは別画像とみなします (デフォルト: 10.0, 範囲: 0.0-255.0)",
+        help="中解像度ピクセル差分(MAE)のしきい値。これを超える平均輝度差のものは別画像とみなします。マイナスの値でこの判定を無効化 (デフォルト: 10.0, 範囲: -1.0-255.0)",
     )
     parser.add_argument(
         "-pdt",
         "--pixel-diff-threshold",
         type=int,
         default=15,
-        help="差分としてカウントするピクセルごとの輝度差のしきい値。小さいほど微細な差分を検出しやすくなります (デフォルト: 15, 範囲: 0-255)",
+        help="差分としてカウントするピクセルごとの輝度差のしきい値。小さいほど微細な差分を検出しやすくなります。マイナスの値で差分ピクセル割合判定を無効化 (デフォルト: 15, 範囲: -1-255)",
     )
     parser.add_argument(
         "-pdr",
         "--pixel-diff-ratio",
         type=float,
         default=0.5,
-        help="差分イラストと判断するための差分ピクセル割合(%%)のしきい値。これ以上の割合で差分ピクセルが存在すれば別画像と見なします (デフォルト: 0.5, 範囲: 0.0-100.0)",
+        help="差分イラストと判断するための差分ピクセル割合(%%)のしきい値。これ以上の割合で差分ピクセルが存在すれば別画像と見なします。マイナスの値でこの判定を無効化 (デフォルト: 0.5, 範囲: -1.0-100.0)",
     )
 
     args = parser.parse_args()
